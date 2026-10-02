@@ -265,5 +265,140 @@ class Solver:
         # TODO: Add any additional methods here
         #
         #
+
+    def _encode(self, state):
+        mask = sum(bit << i for i, bit in enumerate(state.crystal_status))
+        return int(state.row), int(state.col), mask
+
+    def _is_terminal(self, state):
+        row, col, mask = state
+        return (self.game_env.grid_data[row][col] == GameEnv.LAVA_TILE or
+            ((row, col) in self._launch_positions and mask.bit_count() >= self.game_env.min_samples))
+
+    def _legal_actions(self, state):
+        row, col, _ = state
+        if self.game_env.grid_data[row][col] == GameEnv.CRATER_TILE:
+            return [action for action in GameEnv.ACTIONS if action in GameEnv.JUMP_ACTIONS]
+        return [action for action in GameEnv.ACTIONS
+                if action in GameEnv.WALK_ACTIONS or action in GameEnv.BOOST_ACTIONS]
+
+    def _apply_move(self, state, action, distance):
+        row, col, mask = state
+        if action in GameEnv.JUMP_ACTIONS:
+            if self.game_env.grid_data[row][col] != GameEnv.CRATER_TILE:
+                return state, 0.0, False
+        elif self.game_env.grid_data[row][col] == GameEnv.CRATER_TILE:
+            return state, 0.0, False
+
+        reward = -self.game_env.ACTION_COST[action]
+        delta_row, delta_col = self._directions[action]
+        for _ in range(distance):
+            next_row = row + delta_row
+            next_col = col + delta_col
+            if not (0 <= next_row < self.game_env.n_rows and 0 <= next_col < self.game_env.n_cols and
+                    self.game_env.grid_data[next_row][next_col] != GameEnv.ROCK_TILE):
+                reward -= self.game_env.collision_penalty
+                break
+            row, col = next_row, next_col
+            tile = self.game_env.grid_data[row][col]
+            if tile in (GameEnv.CRATER_TILE, GameEnv.LAVA_TILE):
+                break
+
+        crystal_index = self._crystal_indices.get((row, col))
+        if crystal_index is not None:
+            mask |= 1 << crystal_index
+        next_state = (row, col, mask)
+        if self.game_env.grid_data[row][col] == GameEnv.LAVA_TILE:
+            reward -= self.game_env.game_over_penalty
+            return next_state, reward, True
+        return next_state, reward, False
+
+    def _outcomes_for(self, state, action):
+        for candidate, outcomes in self._transition_rows[self._state_index[state]]:
+            if candidate == action:
+                return outcomes
+        raise ValueError(f'Action {action} is not valid in state {state}')
+
+    def _build_action_outcomes(self, state, action):
+        env = self.game_env
+        drift_probability = env.random_drift_prob
+        direction_options = [(action, 1.0 - drift_probability)]
+        direction_options.extend((perpendicular, drift_probability / 2.0)
+                                 for perpendicular in env.PERPENDICULAR_ACTIONS[action])
+        double_options = [(False, 1.0 - env.random_double_prob), (True, env.random_double_prob)]
+        boost_distances = list(enumerate(env.boost_probabilities))
+        accumulated = {}
+
+        for movement, movement_probability in direction_options:
+            if movement_probability == 0.0:
+                continue
+            for doubled, double_probability in double_options:
+                if double_probability == 0.0:
+                    continue
+                first_distances = boost_distances if movement in GameEnv.BOOST_ACTIONS else [(1, 1.0)]
+                for first_distance, first_probability in first_distances:
+                    first_state, first_reward, game_over = self._apply_move(state, movement, first_distance)
+                    branch_probability = movement_probability * double_probability * first_probability
+                    if doubled and not game_over:
+                        second_distances = boost_distances if movement in GameEnv.BOOST_ACTIONS else [(1, 1.0)]
+                        for second_distance, second_probability in second_distances:
+                            second_state, second_reward, _ = self._apply_move(
+                                first_state, movement, second_distance)
+                            probability = branch_probability * second_probability
+                            entry = accumulated.setdefault(second_state, [0.0, 0.0])
+                            entry[0] += probability
+                            entry[1] += probability * (first_reward + second_reward)
+                    else:
+                        entry = accumulated.setdefault(first_state, [0.0, 0.0])
+                        entry[0] += branch_probability
+                        entry[1] += branch_probability * first_reward
+
+        return tuple((next_state, probability, reward_sum / probability)
+                     for next_state, (probability, reward_sum) in accumulated.items())
+
+    def _build_reachable_mdp(self):
+        init_row = self.game_env.init_row
+        init_col = self.game_env.init_col
+        assert init_row is not None and init_col is not None
+        initial = (init_row, init_col, 0)
+        states = [initial]
+        self._state_index = {initial: 0}
+        transition_rows = []
+        cursor = 0
+        while cursor < len(states):
+            state = states[cursor]
+            action_rows = []
+            if not self._is_terminal(state):
+                for action in self._legal_actions(state):
+                    outcomes = self._build_action_outcomes(state, action)
+                    action_rows.append((action, outcomes))
+                    for next_state, _, _ in outcomes:
+                        if next_state not in self._state_index:
+                            self._state_index[next_state] = len(states)
+                            states.append(next_state)
+            transition_rows.append(action_rows)
+            cursor += 1
+        self._states = tuple(states)
+        self._transition_rows = transition_rows
+        self._mdp_built = True
+
+    def _action_value(self, outcomes, values):
+        gamma = self.game_env.gamma
+        return sum(probability * (reward + gamma * values[next_state])
+                   for next_state, probability, reward in outcomes)
+
+    def _greedy_action(self, state, values):
+        row = self._state_index.get(state)
+        if row is None or not self._transition_rows[row]:
+            return GameEnv.WALK_RIGHT
+        best_action = self._transition_rows[row][0][0]
+        best_value = self._action_value(self._transition_rows[row][0][1], values)
+        for action, outcomes in self._transition_rows[row][1:]:
+            value = self._action_value(outcomes, values)
+            if value > best_value + 1e-12:
+                best_action, best_value = action, value
+        return best_action
+
+
     
     
