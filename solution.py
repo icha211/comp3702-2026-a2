@@ -141,66 +141,123 @@ class Solver:
         # === Policy Iteration =============================================================================================
     
         def pi_initialise(self):
-            """
-            Initialise any variables required before the start of Policy Iteration.
-            """
-            #
-            # TODO: Implement any initialisation for Policy Iteration (e.g. building a list of states) here. You should not
-            #  perform policy iteration in this method. You can assume an initial policy of always applying WALK_RIGHT.
-            #
-            # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
-            #
-            pass
-    
-        def pi_is_converged(self):
-            """
-            Check if Policy Iteration has reached convergence.
-            :return: True if converged, False otherwise
-            """
-            #
-            # TODO: Implement code to check if Policy Iteration has reached convergence here.
-            #
-            # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
-            #
-            pass
-    
-        def pi_iteration(self):
-            """
-            Perform a single iteration of Policy Iteration (i.e. perform one step of policy evaluation and one step of
-            policy improvement).
-            """
-            #
-            # TODO: Implement code to perform a single iteration of Policy Iteration (evaluation + improvement) here.
-            #
-            # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
-            #
-            pass
-    
-        def pi_plan_offline(self):
-            """
-            Plan using Policy Iteration.
-            """
-            # !!! In order to ensure compatibility with tester, you should not modify this method !!!
-            self.pi_initialise()
-            while True:
-                self.pi_iteration()
-    
-                # NOTE: pi_iteration is always called before pi_is_converged
-                if self.pi_is_converged():
-                    break
-    
-        def pi_select_action(self, state: GameState):
-            """
-            Retrieve the optimal action for the given state (based on values computed by Value Iteration).
-            :param state: the current state
-            :return: optimal action for the given state (element of ACTIONS)
-            """
-            #
-            # TODO: Implement code to return an action for the given state (based on your stored PI policy) here.
-            #
-            # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
-            #
-            pass
+        """
+        Initialise any variables required before the start of Policy Iteration.
+        """
+        #
+        # TODO: Implement any initialisation for Policy Iteration (e.g. building a list of states) here. You should not
+        #  perform policy iteration in this method. You can assume an initial policy of always applying WALK_RIGHT.
+        #
+        # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
+        #
+        if not self._mdp_built:
+            self._build_reachable_mdp()
+        seed_values = {state: 0.0 for state in self._states}
+        for _ in range(12):
+            for state in reversed(self._states):
+                if self._is_terminal(state):
+                    seed_values[state] = 0.0
+                else:
+                    seed_values[state] = max(self._action_value(outcomes, seed_values)
+                                              for _, outcomes in self._transition_rows[
+                                                  self._state_index[state]])
+        self._policy = {
+            state: self._greedy_action(state, seed_values)
+            for state in self._states if self._transition_rows[self._state_index[state]]
+        }
+        self._values = {state: 0.0 for state in self._states}
+        self._pi_converged = False
+
+    def pi_is_converged(self):
+        """
+        Check if Policy Iteration has reached convergence.
+        :return: True if converged, False otherwise
+        """
+        #
+        # TODO: Implement code to check if Policy Iteration has reached convergence here.
+        #
+        # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
+        #
+        return self._pi_converged
+
+    def pi_iteration(self):
+        """
+        Perform a single iteration of Policy Iteration (i.e. perform one step of policy evaluation and one step of
+        policy improvement).
+        """
+        #
+        # TODO: Implement code to perform a single iteration of Policy Iteration (evaluation + improvement) here.
+        #
+        # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
+        #
+        active_states = [state for state in self._states if not self._is_terminal(state)]
+        count = len(active_states)
+        rewards = np.zeros(count, dtype=float)
+        indices = {state: i for i, state in enumerate(active_states)}
+        matrix_rows = list(range(count))
+        matrix_cols = list(range(count))
+        matrix_data = [1.0] * count
+
+        for row, state in enumerate(active_states):
+            for next_state, probability, reward in self._outcomes_for(state, self._policy[state]):
+                rewards[row] += probability * reward
+                next_index = indices.get(next_state)
+                if next_index is not None:
+                    matrix_rows.append(row)
+                    matrix_cols.append(next_index)
+                    matrix_data.append(-self.game_env.gamma * probability)
+
+        if coo_matrix is None:
+            matrix = np.zeros((count, count), dtype=float)
+            for row, col, value in zip(matrix_rows, matrix_cols, matrix_data):
+                matrix[row, col] += value
+            evaluated = np.linalg.solve(matrix, rewards)
+        else:
+            assert coo_matrix is not None and spsolve is not None
+            matrix = coo_matrix((matrix_data, (matrix_rows, matrix_cols)), shape=(count, count)).tocsr()
+            evaluated = spsolve(matrix, rewards)
+        self._values = {state: 0.0 for state in self._states}
+        for state, value in zip(active_states, evaluated):
+            self._values[state] = float(value)
+
+        improved = {}
+        stable = True
+        for state in active_states:
+            action = self._greedy_action(state, self._values)
+            improved[state] = action
+            if action != self._policy[state]:
+                stable = False
+        self._policy = improved
+        self._pi_converged = stable
+
+    def pi_plan_offline(self):
+        """
+        Plan using Policy Iteration.
+        """
+        # !!! In order to ensure compatibility with tester, you should not modify this method !!!
+        self.pi_initialise()
+        while True:
+            self.pi_iteration()
+
+            # NOTE: pi_iteration is always called before pi_is_converged
+            if self.pi_is_converged():
+                break
+
+    def pi_select_action(self, state: GameState):
+        """
+        Retrieve the optimal action for the given state (based on values computed by Value Iteration).
+        :param state: the current state
+        :return: optimal action for the given state (element of ACTIONS)
+        """
+        #
+        # TODO: Implement code to return an action for the given state (based on your stored PI policy) here.
+        #
+        # In order to ensure compatibility with tester, you should avoid adding additional arguments to this function.
+        #
+        key = self._encode(state)
+        if key in self._policy:
+            return self._policy[key]
+        return self._greedy_action(key, self._values)
     
         # === Helper Methods ===============================================================================================
         #
